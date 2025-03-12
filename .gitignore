@@ -1,0 +1,5 @@
+!*.c
+chat_client
+chat_server
+chat_client2
+cmake-build-debug/

@@ -32,6 +32,7 @@ typedef struct {
 } ClientList;
 
 ClientList *client_list;
+int server_running = 1; // Flag to control server operation
 
 // Tạo một salt ngẫu nhiên cho mã hóa mật khẩu
 void create_salt(char *salt, int length) {
@@ -123,9 +124,10 @@ int login_user(const char *username, const char *password) {
 
 void broadcast_message(const char *message, const char *sender) {
     pthread_mutex_lock(&client_list->clients_mutex);
+    if (sender!=NULL) printf("%s\n", message);
     for (int i = 0; i < client_list->client_count; i++) {
         if (client_list->clients[i]->is_logged_in &&
-            strcmp(client_list->clients[i]->username, sender) != 0) {
+            (sender == NULL || strcmp(client_list->clients[i]->username, sender) != 0)) {
             send(client_list->clients[i]->socket, message, strlen(message), 0);
         }
     }
@@ -227,11 +229,33 @@ void *handle_client(void *arg) {
     return NULL;
 }
 
+// Thread để xử lý nhập liệu từ terminal server
+void *handle_server_input(void *arg) {
+    char buffer[BUFFER_SIZE];
+
+    while (server_running) {
+        // Đọc input từ terminal
+        if (fgets(buffer, BUFFER_SIZE, stdin) != NULL) {
+            buffer[strcspn(buffer, "\n")] = 0;
+            if (strcmp(buffer, "exit") == 0) {
+                printf("Server shutting down...\n");
+                server_running = 0;
+                break;
+            }
+            char server_message[BUFFER_SIZE];
+            sprintf(server_message, "MESSAGE: [Server] %s", buffer);
+
+            broadcast_message(server_message, NULL);
+        }
+    }
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     int server_socket, client_socket;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
-    pthread_t tid;
+    pthread_t tid, server_input_tid;
 
     // Khởi tạo danh sách client
     client_list = (ClientList *)malloc(sizeof(ClientList));
@@ -264,6 +288,13 @@ int main(int argc, char *argv[]) {
 
     printf("===== CHAT SERVER STARTED =====\n");
     printf("Waiting for clients on port %d...\n", ntohs(server_addr.sin_port));
+
+
+    // Tạo thread để xử lý nhập liệu từ terminal server
+    if (pthread_create(&server_input_tid, NULL, &handle_server_input, NULL) != 0) {
+        perror("Failed to create server input thread");
+        exit(EXIT_FAILURE);
+    }
 
     // Chấp nhận và xử lý kết nối từ client
     while (1) {

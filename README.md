@@ -49,3 +49,12 @@ gcc -o chat_client client.c `pkg-config --cflags --libs gtk+-3.0` -lpthread
 ```shell
 gcc -o chat_server server.c -lpthread
 ```
+
+
+```shell
+source oe-init-build-env build-arm
+```
+
+```shell
+runqemu qemuarm qemuparams="-usb -device usb-mouse"
+```

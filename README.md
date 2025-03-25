@@ -56,5 +56,9 @@ source oe-init-build-env build-arm
 ```
 
 ```shell
-runqemu qemuarm qemuparams="-usb -device usb-mouse"
+bitbake core-image-sato
+```
+
+```shell
+runqemu qemuarm64
 ```

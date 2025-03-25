@@ -6,13 +6,18 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
+#include "AES.h"
 
 #define MAX_CLIENTS 100
 #define BUFFER_SIZE 2048
-#define MAX_USERNAME 50
-#define MAX_PASSWORD 50
+#define MAX_USERNAME 64
+#define MAX_PASSWORD 64
 #define USER_FILE "users.dat"
+
+static const uint8_t AES_KEY[AES_KEY_SIZE] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+};
 
 typedef struct {
     char username[MAX_USERNAME];
@@ -34,43 +39,45 @@ typedef struct {
 ClientList *client_list;
 int server_running = 1; // Flag to control server operation
 
-// Tạo một salt ngẫu nhiên cho mã hóa mật khẩu
-void create_salt(char *salt, int length) {
-    const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    srand(time(NULL));
-
-    for (int i = 0; i < length; i++) {
-        int key = rand() % (int)(sizeof(charset) - 1);
-        salt[i] = charset[key];
-    }
-    salt[length] = '\0';
-}
-
-// Mã hóa mật khẩu đơn giản
+// Mã hóa mật khẩu bằng AES-ECB
 void encrypt_password(const char *password, char *encrypted) {
-    char salt[9];
-    create_salt(salt, 8);
+    AESContext ctx;
+    aes_init(&ctx, AES_KEY);
 
-    strcpy(encrypted, salt);
+    size_t len = strlen(password);
+    size_t padded_len = ((len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+    uint8_t *padded_input = calloc(padded_len, 1);
+    memcpy(padded_input, password, len);
 
-    for (int i = 0; i < strlen(password); i++) {
-        encrypted[i + 8] = password[i] + salt[i % 8] % 26;
+    // PKCS#5/PKCS#7 padding
+    uint8_t padding = padded_len - len;
+    for (size_t i = len; i < padded_len; i++) {
+        padded_input[i] = padding;
     }
-    encrypted[strlen(password) + 8] = '\0';
+
+    // Mã hóa
+    aes_encrypt_ecb(&ctx, padded_input, (uint8_t *)encrypted, padded_len);
+
+    free(padded_input);
 }
 
 // Xác thực mật khẩu
 int validate_password(const char *password, const char *encrypted) {
-    char salt[9];
-    strncpy(salt, encrypted, 8);
-    salt[8] = '\0';
+    AESContext ctx;
+    aes_init(&ctx, AES_KEY);
 
-    for (int i = 0; i < strlen(password); i++) {
-        if (encrypted[i + 8] != password[i] + salt[i % 8] % 26) {
-            return 0;
-        }
-    }
-    return 1;
+    size_t len = strlen(password);
+    size_t padded_len = ((len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+
+    // Giải mã
+    uint8_t *decrypted = malloc(padded_len);
+    aes_decrypt_ecb(&ctx, (const uint8_t *)encrypted, decrypted, padded_len);
+
+    // So sánh với mật khẩu gốc
+    int result = (strncmp((char *)decrypted, password, len) == 0);
+
+    free(decrypted);
+    return result;
 }
 
 // Đăng ký người dùng mới

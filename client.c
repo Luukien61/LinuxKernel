@@ -165,8 +165,9 @@ void on_send_button_clicked(GtkWidget *widget, gpointer data) {
 
     // Add message to chat
     char chat_message[BUFFER_SIZE + 100];
-    sprintf(chat_message, "%s: %s", current_username, message);
-    append_to_chat(chat_message);
+    sprintf(chat_message, "%s: %s", "You", message);
+    gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(chat_message));
+
 
     // Clear message entry
     gtk_entry_set_text(GTK_ENTRY(message_entry), "");
@@ -253,7 +254,7 @@ void* receive_messages(void* arg) {
             printf("REGISTER_SUCCESS");
             //gdk_threads_add_idle((GSourceFunc)gtk_stack_set_visible_child_name, GTK_STACK(stack));
             gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
-            gdk_threads_add_idle((GSourceFunc)show_info, g_strdup("Registration successful"));
+            //gdk_threads_add_idle((GSourceFunc)show_info, g_strdup("Registration successful"));
         } else if (strncmp(buffer, "REGISTER_FAIL", strlen("REGISTER_FAIL")) == 0) {
             gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Registration failed"));
         } else if (strncmp(buffer, "LOGIN_SUCCESS", strlen("LOGIN_SUCCESS")) == 0) {
@@ -552,7 +553,7 @@ int main(int argc, char **argv) {
     GtkApplication *app;
     int status;
 
-    app = gtk_application_new("com.kienluu.chat-2", G_APPLICATION_FLAGS_NONE);
+    app = gtk_application_new("com.kienluu.chat", G_APPLICATION_FLAGS_NONE);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

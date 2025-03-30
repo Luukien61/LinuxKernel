@@ -160,7 +160,7 @@ void on_send_button_clicked(GtkWidget *widget, gpointer data) {
 
     // Send message command
     char buffer[BUFFER_SIZE];
-    sprintf(buffer, "MESSAGE: %s %s", current_username, message);
+    sprintf(buffer, "MESSAGE: %s: %s", current_username, message);
     send(client_socket, buffer, strlen(buffer), 0);
 
     // Add message to chat
@@ -228,7 +228,7 @@ void on_logout_button_clicked(GtkWidget *widget, gpointer data) {
     char buffer[BUFFER_SIZE];
     sprintf(buffer, "LOGOUT");
     send(client_socket, buffer, strlen(buffer), 0);
-
+    gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
     // Response will be handled by receive_messages thread
 }
 
@@ -249,6 +249,7 @@ void* receive_messages(void* arg) {
 
     while ((bytes_read = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
         buffer[bytes_read] = '\0';
+        printf("%s\n", buffer);
 
         if (strncmp(buffer, "REGISTER_SUCCESS", strlen("REGISTER_SUCCESS")) == 0) {
             printf("REGISTER_SUCCESS");
@@ -259,7 +260,6 @@ void* receive_messages(void* arg) {
             gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Registration failed"));
         } else if (strncmp(buffer, "LOGIN_SUCCESS", strlen("LOGIN_SUCCESS")) == 0) {
             logged_in = 1;
-            // Extract username
             char username[50];
             sscanf(buffer, "LOGIN_SUCCESS %s", username);
             printf("%s\n", username);
@@ -281,8 +281,6 @@ void* receive_messages(void* arg) {
             gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Login failed"));
         } else if (strncmp(buffer, "LOGOUT_SUCCESS", strlen("LOGOUT_SUCCESS")) == 0) {
             logged_in = 0;
-            //gdk_threads_add_idle((GSourceFunc)gtk_stack_set_visible_child_name, GTK_STACK(stack));
-            gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
         } else if (strncmp(buffer, "JOIN_SUCCESS", strlen("JOIN_SUCCESS")) == 0) {
             char room[50];
             sscanf(buffer, "JOIN_SUCCESS %s", room);
@@ -317,8 +315,13 @@ void* receive_messages(void* arg) {
             char sender[50];
             char message[BUFFER_SIZE];
             char full_message[BUFFER_SIZE];
-            printf("%s\n", buffer);
-            sscanf(buffer, "MESSAGE: %s %[^\n]", sender, message);
+            printf("buffer: %s\n", buffer);
+            sscanf(buffer, "MESSAGE: %49[^:]: %[^\n]", sender, message);
+            printf("Sender after scan: %s\n", sender);
+            printf("message: %s\n", message);
+            if (strncasecmp(sender, current_username, strlen(current_username))==0) {
+                strcpy(sender, "You");
+            }
             sprintf(full_message, "%s: %s",sender, message);
             printf("%s\n", full_message);
 
@@ -553,7 +556,7 @@ int main(int argc, char **argv) {
     GtkApplication *app;
     int status;
 
-    app = gtk_application_new("com.kienluu.chat", G_APPLICATION_FLAGS_NONE);
+    app = gtk_application_new("com.kienluu.chat-2", G_APPLICATION_FLAGS_NONE);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

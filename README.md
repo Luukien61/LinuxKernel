@@ -43,11 +43,11 @@ runqemu qemuarm qemuparams="-usb -device usb-mouse"
 
 * client.c
 ```shell
-gcc -o chat_client client.c `pkg-config --cflags --libs gtk+-3.0` -lpthread
+gcc -o chat_client client.c AES.c `pkg-config --cflags --libs gtk+-3.0` -lpthread
 ```
 * server.c
 ```shell
-gcc -o chat_server server.c -lpthread
+gcc -o chat_server server.c AES.c -lpthread
 ```
 
 

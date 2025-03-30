@@ -7,12 +7,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "AES.h"
+#include <signal.h>
 
 #define MAX_CLIENTS 100
 #define BUFFER_SIZE 2048
 #define MAX_USERNAME 64
 #define MAX_PASSWORD 64
 #define USER_FILE "users.dat"
+#define HISTORY_FILE "chat_history.dat"
 
 static const uint8_t AES_KEY[AES_KEY_SIZE] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -36,13 +38,76 @@ typedef struct {
     pthread_mutex_t clients_mutex;
 } ClientList;
 
+int server_socket;
 ClientList *client_list;
 int server_running = 1; // Flag to control server operation
+AESContext aes_ctx;
 
+
+void save_encrypted_message(const char *message, AESContext *ctx) {
+    FILE *file = fopen(HISTORY_FILE, "a");
+    if (file == NULL) {
+        perror("Cannot open history file");
+        return;
+    }
+
+    size_t len = strlen(message);
+    size_t padded_len = ((len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+    uint8_t *padded_input = calloc(padded_len, 1);
+    memcpy(padded_input, message, len);
+
+    // PKCS#5/PKCS#7 padding
+    uint8_t padding = padded_len - len;
+    for (size_t i = len; i < padded_len; i++) {
+        padded_input[i] = padding;
+    }
+
+    // Mã hóa tin nhắn
+    uint8_t *encrypted = malloc(padded_len);
+    aes_encrypt_ecb(ctx, padded_input, encrypted, padded_len);
+
+    // Ghi độ dài tin nhắn gốc và dữ liệu mã hóa vào file
+    fwrite(&len, sizeof(size_t), 1, file);  // Lưu độ dài gốc để giải mã
+    fwrite(encrypted, 1, padded_len, file);
+
+    free(padded_input);
+    free(encrypted);
+    fclose(file);
+}
+
+void send_chat_history(int client_socket, AESContext *ctx) {
+    FILE *file = fopen(HISTORY_FILE, "r");
+    if (file == NULL) {
+        return;
+    }
+
+    size_t msg_len;
+    printf("client_socket: %d\n", client_socket);
+    while (fread(&msg_len, sizeof(size_t), 1, file) == 1) {
+        size_t padded_len = ((msg_len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+        uint8_t *encrypted = malloc(padded_len);
+        fread(encrypted, 1, padded_len, file);
+
+        uint8_t *decrypted = malloc(padded_len);
+        aes_decrypt_ecb(ctx, encrypted, decrypted, padded_len);
+
+        uint8_t padding = decrypted[padded_len - 1];
+        size_t unpadded_len = padded_len - padding;
+        if (unpadded_len > msg_len) unpadded_len = msg_len;
+
+        decrypted[unpadded_len] = '\0';
+        char formatted_message[BUFFER_SIZE];
+        snprintf(formatted_message, BUFFER_SIZE, "%s\n", (char *)decrypted);
+        printf("%s", formatted_message);
+        send(client_socket, formatted_message, strlen(formatted_message), 0);
+        usleep(1000);
+        free(encrypted);
+        free(decrypted);
+    }
+    fclose(file);
+}
 // Mã hóa mật khẩu bằng AES-ECB
 void encrypt_password(const char *password, char *encrypted) {
-    AESContext ctx;
-    aes_init(&ctx, AES_KEY);
 
     size_t len = strlen(password);
     size_t padded_len = ((len + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
@@ -56,7 +121,7 @@ void encrypt_password(const char *password, char *encrypted) {
     }
 
     // Mã hóa
-    aes_encrypt_ecb(&ctx, padded_input, (uint8_t *)encrypted, padded_len);
+    aes_encrypt_ecb(&aes_ctx, padded_input, (uint8_t *)encrypted, padded_len);
 
     free(padded_input);
 }
@@ -184,16 +249,17 @@ void *handle_client(void *arg) {
 
                 // Thông báo cho tất cả mọi người
                 char notification[BUFFER_SIZE];
-                sprintf(notification, "*** %s đã tham gia cuộc trò chuyện ***\n", username);
+                sprintf(notification, " %s đã tham gia cuộc trò chuyện \n", username);
                 broadcast_message(notification, "Server");
                 printf("Client logged in: %s with socket %d\n", client->username, client->socket);
+                send_chat_history(client->socket, &aes_ctx);
             } else {
                 send(client->socket, "LOGIN_FAIL", strlen("LOGIN_FAIL"), 0);
             }
         } else if (strcmp(buffer, "LOGOUT") == 0) {
             if (client->is_logged_in) {
                 char notification[BUFFER_SIZE];
-                sprintf(notification, "*** %s đã rời khỏi cuộc trò chuyện ***\n", client->username);
+                sprintf(notification, " %s đã rời khỏi cuộc trò chuyện \n", client->username);
                 broadcast_message(notification, "Server");
 
                 client->is_logged_in = 0;
@@ -204,6 +270,7 @@ void *handle_client(void *arg) {
         } else {
             if (client->is_logged_in) {
                 broadcast_message(buffer, client->username);
+                save_encrypted_message(buffer, &aes_ctx);
             } else {
                 send(client->socket, "NOT_LOGGED_IN", strlen("NOT_LOGGED_IN"), 0);
             }
@@ -215,7 +282,7 @@ void *handle_client(void *arg) {
 
     if (client->is_logged_in) {
         char notification[BUFFER_SIZE];
-        sprintf(notification, "*** %s đã ngắt kết nối ***\n", client->username);
+        sprintf(notification, " %s đã ngắt kết nối \n", client->username);
         broadcast_message(notification, "Server");
     }
 
@@ -258,16 +325,20 @@ void *handle_server_input(void *arg) {
     return NULL;
 }
 
+
+
 int main(int argc, char *argv[]) {
-    int server_socket, client_socket;
+    int client_socket;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
     pthread_t tid, server_input_tid;
-
+    aes_init(&aes_ctx, AES_KEY);
     // Khởi tạo danh sách client
     client_list = (ClientList *)malloc(sizeof(ClientList));
     client_list->client_count = 0;
     pthread_mutex_init(&client_list->clients_mutex, NULL);
+
+
 
     // Tạo socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -304,7 +375,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Chấp nhận và xử lý kết nối từ client
-    while (1) {
+    while (server_running) {
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
         if (client_socket == -1) {
             perror("Client connection failed");
@@ -341,4 +412,6 @@ int main(int argc, char *argv[]) {
             free(client);
         }
     }
+    close(server_socket);
+    return 0;
 }

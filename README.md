@@ -1,6 +1,9 @@
-```Chạy lệnh sau để tạo file:```
+### Video demo
+```text
+https://youtu.be/aMcj7Vty2NA
+```
 
-
+### Commands
 ```shell
 nano /usr/lib/pkgconfig/egl.pc
 ```
@@ -62,3 +65,11 @@ bitbake core-image-sato
 ```shell
 runqemu qemuarm64
 ```
+
+
+
+ứng dụng có lưu lịch sử chat vào 1 file chat_history.dat. ứng dụng chat ở đây là chat room, 
+tức là mọi người đăng nhập vào đều nhắn vào 1 nhóm duy nhất. danh sách người dùng, thông tin đăng nhập được lưu 
+vào 1 file user.dat . File này thì mã hóa mật khẩu AES. tên đăng nhập thì không mã hóa nhá. Còn lịch sử chat 
+thì đều được mã hóa. ứng dụng sẽ có thêm chức năng gửi, tải file. 
+

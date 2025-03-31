@@ -487,10 +487,8 @@ void send_file_to_server(const char *filepath) {
     // Trễ 100ms để server xử lý xong file
     usleep(100000); // 100ms
 
-    // Gửi tin nhắn thông báo
     char message[BUFFER_SIZE];
     snprintf(message, BUFFER_SIZE, "MESSAGE: %s: [FILE] %s\n", current_username, filename);
-    printf("Sending message: %s", message); // Debug
     if (send(client_socket, message, strlen(message), 0) < 0) {
         perror("Failed to send file notification");
         return;
@@ -544,7 +542,7 @@ void download_file(const char *filename) {
         return;
     }
 
-    char *file_buffer = malloc(FILE_BUFFER_SIZE); // Dùng FILE_BUFFER_SIZE
+    char *file_buffer = malloc(FILE_BUFFER_SIZE);
     if (!file_buffer) {
         perror("Failed to allocate file buffer");
         fclose(file);

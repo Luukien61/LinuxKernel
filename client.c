@@ -9,17 +9,21 @@
 #define SERVER_IP "127.0.0.1"
 #define PORT 8888
 #define BUFFER_SIZE 2048
+#define FILE_BUFFER_SIZE 10485760
 
 // Global variables
 int client_socket;
 char current_username[50];
 char current_room[50];
 int logged_in = 0;
+int downloading = 0;
+char download_filename[100] = "";
 
 #define MAX_CLIENTS 100
 #define BUFFER_SIZE 2048
 #define MAX_USERNAME 50
 #define MAX_PASSWORD 50
+
 typedef struct {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
@@ -51,10 +55,14 @@ GtkTextBuffer *chat_buffer;
 GtkWidget *status_label;
 
 // Function prototypes
-void* receive_messages(void* arg);
-void show_error(const char* message);
-void show_info(const char* message);
-void append_to_chat(const char* message);
+void *receive_messages(void *arg);
+
+void show_error(const char *message);
+
+void show_info(const char *message);
+
+void append_to_chat(const char *message);
+
 void clear_chat();
 
 // Connect to server
@@ -78,7 +86,7 @@ int connect_to_server() {
     }
 
     // Connect to server
-    if (connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    if (connect(client_socket, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
         show_error("Connection failed");
         return 0;
     }
@@ -116,8 +124,6 @@ void on_register_button_clicked(GtkWidget *widget, gpointer data) {
     char buffer[BUFFER_SIZE];
     sprintf(buffer, "REGISTER %s %s", username, password);
     send(client_socket, buffer, strlen(buffer), 0);
-
-
 }
 
 // Login button click handler
@@ -158,16 +164,27 @@ void on_send_button_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
 
-    // Send message command
-    char buffer[BUFFER_SIZE];
-    sprintf(buffer, "MESSAGE: %s: %s", current_username, message);
-    send(client_socket, buffer, strlen(buffer), 0);
+    char command[20], filename[100];
+    if (sscanf(message, "%s %s", command, filename) == 2 && strcmp(command, "download") == 0) {
+        char buffer[BUFFER_SIZE];
+        snprintf(buffer, BUFFER_SIZE, "DOWNLOAD %s", filename);
+        if (send(client_socket, buffer, strlen(buffer), 0) < 0) {
+            perror("Failed to send DOWNLOAD command");
+            return;
+        }
+        printf("Sent DOWNLOAD request for %s\n", filename);
+        downloading = 1;
+        strcpy(download_filename, filename); // Lưu tên file để xử lý trong receive_messages
+        gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup("Downloading...\n"));
+    } else {
+        char buffer[BUFFER_SIZE];
+        snprintf(buffer, BUFFER_SIZE, "MESSAGE: %s: %s", current_username, message);
+        send(client_socket, buffer, strlen(buffer), 0);
 
-    // Add message to chat
-    char chat_message[BUFFER_SIZE + 100];
-    sprintf(chat_message, "%s: %s", "You", message);
-    gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(chat_message));
-
+        char chat_message[BUFFER_SIZE + 100];
+        snprintf(chat_message, BUFFER_SIZE + 100, "You: %s", message);
+        gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(chat_message));
+    }
 
     // Clear message entry
     gtk_entry_set_text(GTK_ENTRY(message_entry), "");
@@ -243,141 +260,165 @@ void on_goto_login_clicked(GtkWidget *widget, gpointer data) {
 }
 
 // Receive messages from server
-void* receive_messages(void* arg) {
-    char buffer[BUFFER_SIZE];
+void *receive_messages(void *arg) {
+    char *buffer = malloc(BUFFER_SIZE);
+    if (!buffer) {
+        perror("Failed to allocate buffer");
+        return NULL;
+    }
     int bytes_read;
+    static size_t file_size = 0;
+    static size_t total_received = 0;
+    static FILE *file = NULL;
 
-    while ((bytes_read = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
+    while ((bytes_read = recv(client_socket, buffer, BUFFER_SIZE - 1, 0)) > 0) {
         buffer[bytes_read] = '\0';
-        printf("%s\n", buffer);
+        printf("Raw buffer: [%s]\n", buffer); // In buffer thô để debug
 
-        if (strncmp(buffer, "REGISTER_SUCCESS", strlen("REGISTER_SUCCESS")) == 0) {
-            printf("REGISTER_SUCCESS");
-            //gdk_threads_add_idle((GSourceFunc)gtk_stack_set_visible_child_name, GTK_STACK(stack));
-            gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
-            //gdk_threads_add_idle((GSourceFunc)show_info, g_strdup("Registration successful"));
-        } else if (strncmp(buffer, "REGISTER_FAIL", strlen("REGISTER_FAIL")) == 0) {
-            gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Registration failed"));
-        } else if (strncmp(buffer, "LOGIN_SUCCESS", strlen("LOGIN_SUCCESS")) == 0) {
-            logged_in = 1;
-            char username[50];
-            sscanf(buffer, "LOGIN_SUCCESS %s", username);
-            printf("%s\n", username);
-            strcpy(current_username, username);
-            strcpy(current_room, "General");
+        if (downloading && strlen(download_filename) > 0) {
+            // Giữ nguyên logic tải file
+            if (file_size == 0) {
+                if (bytes_read == sizeof(size_t)) {
+                    memcpy(&file_size, buffer, sizeof(size_t));
+                    printf("File size received: %zu bytes\n", file_size);
 
-            // gdk_threads_add_idle((GSourceFunc)gtk_stack_set_visible_child_name, GTK_STACK(stack));
-            gtk_stack_set_visible_child_name(GTK_STACK(stack), "chat_page");
-            //
-            char status[100];
-            sprintf(status, "Logged in as: %s | Room: %s", current_username, current_room);
-            //gdk_threads_add_idle((GSourceFunc)gtk_label_set_text, status_label);
-            gtk_label_set_text(GTK_LABEL(status_label), status);
+                    if (file_size == 0) {
+                        show_error("File not found on server");
+                        downloading = 0;
+                        download_filename[0] = '\0';
+                        continue;
+                    }
 
-            gdk_threads_add_idle((GSourceFunc)clear_chat, NULL);
-            gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup("Welcome to the chat!\n"));
+                    system("mkdir -p downloads");
+                    char filepath[BUFFER_SIZE];
+                    snprintf(filepath, BUFFER_SIZE, "downloads/%s", download_filename);
+                    file = fopen(filepath, "wb");
+                    if (!file) {
+                        perror("Cannot create local file");
+                        downloading = 0;
+                        download_filename[0] = '\0';
+                        continue;
+                    }
+                } else {
+                    printf("Invalid file size data: %d bytes\n", bytes_read);
+                    downloading = 0;
+                    download_filename[0] = '\0';
+                }
+            } else {
+                fwrite(buffer, 1, bytes_read, file);
+                total_received += bytes_read;
+                printf("Received %d bytes, total: %zu/%zu\n", bytes_read, total_received, file_size);
 
-        } else if (strncmp(buffer, "LOGIN_FAIL", strlen("LOGIN_FAIL")) == 0) {
-            gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Login failed"));
-        } else if (strncmp(buffer, "LOGOUT_SUCCESS", strlen("LOGOUT_SUCCESS")) == 0) {
-            logged_in = 0;
-        } else if (strncmp(buffer, "JOIN_SUCCESS", strlen("JOIN_SUCCESS")) == 0) {
-            char room[50];
-            sscanf(buffer, "JOIN_SUCCESS %s", room);
-            strcpy(current_room, room);
-
-            char status[100];
-            sprintf(status, "Logged in as: %s | Room: %s", current_username, current_room);
-            //gdk_threads_add_idle((GSourceFunc)gtk_label_set_text, status_label);
-            gtk_label_set_text(GTK_LABEL(status_label), status);
-
-            gdk_threads_add_idle((GSourceFunc)clear_chat, NULL);
-
-            char message[100];
-            sprintf(message, "Joined room: %s\n", current_room);
-            gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(message));
-        } else if (strncmp(buffer, "CREATE_SUCCESS", strlen("CREATE_SUCCESS")) == 0) {
-            char room[50];
-            sscanf(buffer, "CREATE_SUCCESS %s", room);
-            strcpy(current_room, room);
-
-            char status[100];
-            sprintf(status, "Logged in as: %s | Room: %s", current_username, current_room);
-            //gdk_threads_add_idle((GSourceFunc)gtk_label_set_text, status_label);
-            gtk_label_set_text(GTK_LABEL(status_label), status);
-
-            gdk_threads_add_idle((GSourceFunc)clear_chat, NULL);
-
-            char message[100];
-            sprintf(message, "Created and joined room: %s\n", current_room);
-            gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(message));
-        } else if (strncmp(buffer, "MESSAGE", strlen("MESSAGE")) == 0) {
-            char sender[50];
-            char message[BUFFER_SIZE];
-            char full_message[BUFFER_SIZE];
-            printf("buffer: %s\n", buffer);
-            sscanf(buffer, "MESSAGE: %49[^:]: %[^\n]", sender, message);
-            printf("Sender after scan: %s\n", sender);
-            printf("message: %s\n", message);
-            if (strncasecmp(sender, current_username, strlen(current_username))==0) {
-                strcpy(sender, "You");
+                if (total_received >= file_size) {
+                    fclose(file);
+                    file = NULL;
+                    char message[BUFFER_SIZE];
+                    snprintf(message, BUFFER_SIZE, "File %s downloaded (%zu bytes)\n", download_filename,
+                             total_received);
+                    gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(message));
+                    downloading = 0;
+                    download_filename[0] = '\0';
+                    file_size = 0;
+                    total_received = 0;
+                }
             }
-            sprintf(full_message, "%s: %s",sender, message);
-            printf("%s\n", full_message);
+            continue;
+        }
 
-            gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(full_message));
-            // if (strcmp(room, current_room) == 0) {
-            //     gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(message));
-            // }
-        } else if (strncmp(buffer, "SYSTEM", strlen("SYSTEM")) == 0) {
-            char room[50];
-            char message[BUFFER_SIZE];
-            sscanf(buffer, "SYSTEM %s %[^\n]", room, message);
-
-            if (strcmp(room, current_room) == 0) {
-                char system_message[BUFFER_SIZE];
-                sprintf(system_message, "[SYSTEM] %s", message);
-                gdk_threads_add_idle((GSourceFunc)append_to_chat, g_strdup(system_message));
+        // Xử lý từng dòng trong buffer
+        char *line = buffer;
+        while (line && *line) {
+            char *next_line = strchr(line, '\n');
+            if (next_line) {
+                *next_line = '\0'; // Tách dòng
+                next_line++;
+                if (*next_line == '\0') next_line = NULL; // Ngăn next_line trỏ vào rỗng
             }
+
+            printf("Processing line: %s\n", line);
+
+            if (strncmp(line, "MESSAGE", strlen("MESSAGE")) == 0) {
+                char sender[50], message[BUFFER_SIZE], full_message[BUFFER_SIZE];
+                if (sscanf(line, "MESSAGE: %49[^:]: %[^\n]", sender, message) == 2) {
+                    printf("Sender: %s, Message: %s\n", sender, message);
+                    if (strncasecmp(sender, current_username, strlen(current_username)) == 0) {
+                        strcpy(sender, "You");
+                    }
+                    sprintf(full_message, "%s: %s", sender, message);
+                    gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(full_message));
+                } else {
+                    printf("Failed to parse MESSAGE: %s\n", line);
+                }
+            } else if (strncmp(line, "REGISTER_SUCCESS", strlen("REGISTER_SUCCESS")) == 0) {
+                gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
+            } else if (strncmp(line, "REGISTER_FAIL", strlen("REGISTER_FAIL")) == 0) {
+                gdk_threads_add_idle((GSourceFunc) show_error, g_strdup("Registration failed"));
+            } else if (strncmp(line, "LOGIN_SUCCESS", strlen("LOGIN_SUCCESS")) == 0) {
+                logged_in = 1;
+                char username[50];
+                sscanf(line, "LOGIN_SUCCESS %s", username);
+                strcpy(current_username, username);
+                strcpy(current_room, "General");
+                gtk_stack_set_visible_child_name(GTK_STACK(stack), "chat_page");
+                char status[100];
+                sprintf(status, "Logged in as: %s | Room: %s", current_username, current_room);
+                gtk_label_set_text(GTK_LABEL(status_label), status);
+                gdk_threads_add_idle((GSourceFunc) clear_chat, NULL);
+                gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup("Welcome to the chat!\n"));
+            } else if (strncmp(line, "LOGIN_FAIL", strlen("LOGIN_FAIL")) == 0) {
+                gdk_threads_add_idle((GSourceFunc) show_error, g_strdup("Login failed"));
+            } else if (strncmp(line, "LOGOUT_SUCCESS", strlen("LOGOUT_SUCCESS")) == 0) {
+                logged_in = 0;
+            } else if (strncmp(line, "SYSTEM", strlen("SYSTEM")) == 0) {
+                char room[50], message[BUFFER_SIZE];
+                if (sscanf(line, "SYSTEM %s %[^\n]", room, message) == 2) {
+                    if (strcmp(room, current_room) == 0) {
+                        char system_message[BUFFER_SIZE];
+                        sprintf(system_message, "[SYSTEM] %s", message);
+                        gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(system_message));
+                    }
+                }
+            }
+
+            line = next_line;
         }
     }
 
-    // Connection closed
     logged_in = 0;
     close(client_socket);
     client_socket = 0;
 
-    gdk_threads_add_idle((GSourceFunc)show_error, g_strdup("Disconnected from server"));
-    //gdk_threads_add_idle((GSourceFunc)gtk_stack_set_visible_child_name, GTK_STACK(stack));
+    gdk_threads_add_idle((GSourceFunc) show_error, g_strdup("Disconnected from server"));
     gtk_stack_set_visible_child_name(GTK_STACK(stack), "login_page");
 
+    free(buffer);
     return NULL;
 }
 
 // Show error message
-void show_error(const char* message) {
+void show_error(const char *message) {
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
-                                             GTK_DIALOG_DESTROY_WITH_PARENT,
-                                             GTK_MESSAGE_ERROR,
-                                             GTK_BUTTONS_CLOSE,
-                                             "%s", message);
+                                               GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               GTK_MESSAGE_ERROR,
+                                               GTK_BUTTONS_CLOSE,
+                                               "%s", message);
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
 }
 
 // Show info message
-void show_info(const char* message) {
+void show_info(const char *message) {
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
-                                             GTK_DIALOG_DESTROY_WITH_PARENT,
-                                             GTK_MESSAGE_INFO,
-                                             GTK_BUTTONS_CLOSE,
-                                             "%s", message);
+                                               GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               GTK_MESSAGE_INFO,
+                                               GTK_BUTTONS_CLOSE,
+                                               "%s", message);
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
 }
 
 // Append message to chat
-void append_to_chat(const char* message) {
+void append_to_chat(const char *message) {
     GtkTextIter iter;
 
     gtk_text_buffer_get_end_iter(chat_buffer, &iter);
@@ -394,6 +435,135 @@ void append_to_chat(const char* message) {
 // Clear chat
 void clear_chat() {
     gtk_text_buffer_set_text(chat_buffer, "", -1);
+}
+
+void send_file_to_server(const char *filepath) {
+    FILE *file = fopen(filepath, "rb");
+    if (!file) {
+        show_error("Cannot open file");
+        return;
+    }
+
+    // Lấy tên file từ đường dẫn
+    const char *filename = strrchr(filepath, '/');
+    if (!filename) filename = filepath;
+    else filename++; // Bỏ qua ký tự '/'
+
+    // Lấy kích thước file
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    // Gửi lệnh UPLOAD
+    char buffer[BUFFER_SIZE];
+    snprintf(buffer, BUFFER_SIZE, "UPLOAD %s %zu", filename, file_size);
+    if (send(client_socket, buffer, strlen(buffer), 0) < 0) {
+        perror("Failed to send UPLOAD command");
+        fclose(file);
+        return;
+    }
+
+    char *file_buffer = malloc(FILE_BUFFER_SIZE);
+    if (!file_buffer) {
+        perror("Failed to allocate file buffer");
+        fclose(file);
+        return;
+    }
+
+    // Gửi dữ liệu file
+    size_t bytes_read;
+    while ((bytes_read = fread(file_buffer, 1, FILE_BUFFER_SIZE, file)) > 0) {
+        if (send(client_socket, file_buffer, bytes_read, 0) < 0) {
+            perror("Failed to send file data");
+            free(file_buffer);
+            fclose(file);
+            return;
+        }
+    }
+
+    free(file_buffer);
+    fclose(file);
+
+    // Trễ 100ms để server xử lý xong file
+    usleep(100000); // 100ms
+
+    // Gửi tin nhắn thông báo
+    char message[BUFFER_SIZE];
+    snprintf(message, BUFFER_SIZE, "MESSAGE: %s: [FILE] %s\n", current_username, filename);
+    printf("Sending message: %s", message); // Debug
+    if (send(client_socket, message, strlen(message), 0) < 0) {
+        perror("Failed to send file notification");
+        return;
+    }
+
+    // Thêm thông báo vào giao diện cục bộ
+    char chat_message[BUFFER_SIZE];
+    snprintf(chat_message, BUFFER_SIZE, "You: [FILE] %s\n", filename);
+    gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(chat_message));
+}
+
+void on_upload_button_clicked(GtkWidget *widget, gpointer data) {
+    if (!logged_in) {
+        show_error("You are not logged in");
+        return;
+    }
+
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Select File",
+                                                    GTK_WINDOW(window),
+                                                    GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                    "Cancel", GTK_RESPONSE_CANCEL,
+                                                    "Open", GTK_RESPONSE_ACCEPT,
+                                                    NULL);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filepath = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        send_file_to_server(filepath);
+        g_free(filepath);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+void download_file(const char *filename) {
+    char buffer[BUFFER_SIZE];
+    snprintf(buffer, BUFFER_SIZE, "DOWNLOAD %s", filename);
+    send(client_socket, buffer, strlen(buffer), 0);
+
+    size_t file_size;
+    recv(client_socket, &file_size, sizeof(size_t), 0);
+
+    if (file_size == 0) {
+        show_error("File not found on server");
+        return;
+    }
+
+    char filepath[BUFFER_SIZE];
+    snprintf(filepath, BUFFER_SIZE, "downloads/%s", filename);
+    FILE *file = fopen(filepath, "wb");
+    if (!file) {
+        show_error("Cannot create local file");
+        return;
+    }
+
+    char *file_buffer = malloc(FILE_BUFFER_SIZE); // Dùng FILE_BUFFER_SIZE
+    if (!file_buffer) {
+        perror("Failed to allocate file buffer");
+        fclose(file);
+        return;
+    }
+
+    size_t total_received = 0;
+    int bytes_received;
+    while (total_received < file_size &&
+           (bytes_received = recv(client_socket, file_buffer, FILE_BUFFER_SIZE, 0)) > 0) {
+        fwrite(file_buffer, 1, bytes_received, file);
+        total_received += bytes_received;
+    }
+
+    free(file_buffer);
+    fclose(file);
+    char message[BUFFER_SIZE];
+    snprintf(message, BUFFER_SIZE, "File %s downloaded (%zu bytes)\n", filename, total_received);
+    gdk_threads_add_idle((GSourceFunc) append_to_chat, g_strdup(message));
 }
 
 // Create UI
@@ -515,8 +685,8 @@ static void activate(GtkApplication *app, gpointer user_data) {
     // Chat area
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window),
-                                  GTK_POLICY_AUTOMATIC,
-                                  GTK_POLICY_AUTOMATIC);
+                                   GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
     gtk_widget_set_vexpand(scrolled_window, TRUE);
     gtk_container_add(GTK_CONTAINER(chat_box), scrolled_window);
 
@@ -541,6 +711,10 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(send_button, "clicked", G_CALLBACK(on_send_button_clicked), NULL);
     gtk_container_add(GTK_CONTAINER(message_box), send_button);
 
+    GtkWidget *upload_button = gtk_button_new_with_label("Upload File");
+    g_signal_connect(upload_button, "clicked", G_CALLBACK(on_upload_button_clicked), NULL);
+    gtk_container_add(GTK_CONTAINER(message_box), upload_button);
+
 
     // Enter key to send message
     g_signal_connect(message_entry, "activate", G_CALLBACK(on_send_button_clicked), NULL);
@@ -563,4 +737,5 @@ int main(int argc, char **argv) {
 
     return status;
 }
+
 //export DISPLAY=:0

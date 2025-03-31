@@ -11,6 +11,7 @@
 
 #define MAX_CLIENTS 100
 #define BUFFER_SIZE 2048
+#define FILE_BUFFER_SIZE 10485760
 #define MAX_USERNAME 64
 #define MAX_PASSWORD 64
 #define USER_FILE "users.dat"
@@ -75,6 +76,69 @@ void save_encrypted_message(const char *message, AESContext *ctx) {
     fclose(file);
 }
 
+void save_file(int client_socket, const char *filename, size_t file_size) {
+    char filepath[BUFFER_SIZE];
+    snprintf(filepath, BUFFER_SIZE, "uploads/%s", filename);
+
+    FILE *file = fopen(filepath, "wb");
+    if (!file) {
+        perror("Cannot create file");
+        return;
+    }
+
+    char *buffer = malloc(FILE_BUFFER_SIZE);  // Dùng FILE_BUFFER_SIZE
+    if (!buffer) {
+        perror("Failed to allocate buffer");
+        fclose(file);
+        return;
+    }
+
+    size_t total_received = 0;
+    int bytes_received;
+    while (total_received < file_size &&
+           (bytes_received = recv(client_socket, buffer, FILE_BUFFER_SIZE, 0)) > 0) {
+        fwrite(buffer, 1, bytes_received, file);
+        total_received += bytes_received;
+           }
+
+    free(buffer);
+    fclose(file);
+    printf("File %s saved (%zu bytes)\n", filename, total_received);
+}
+
+void send_file(int client_socket, const char *filename) {
+    char filepath[BUFFER_SIZE];
+    snprintf(filepath, BUFFER_SIZE, "uploads/%s", filename);
+
+    FILE *file = fopen(filepath, "rb");
+    if (!file) {
+        send(client_socket, "FILE_NOT_FOUND", strlen("FILE_NOT_FOUND"), 0);
+        return;
+    }
+
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    send(client_socket, &file_size, sizeof(size_t), 0);
+
+    char *buffer = malloc(FILE_BUFFER_SIZE);  // Dùng FILE_BUFFER_SIZE
+    if (!buffer) {
+        perror("Failed to allocate buffer");
+        fclose(file);
+        return;
+    }
+
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, FILE_BUFFER_SIZE, file)) > 0) {
+        send(client_socket, buffer, bytes_read, 0);
+    }
+
+    free(buffer);
+    fclose(file);
+    printf("File %s sent to client\n", filename);
+}
+
 void send_chat_history(int client_socket, AESContext *ctx) {
     FILE *file = fopen(HISTORY_FILE, "r");
     if (file == NULL) {
@@ -100,7 +164,7 @@ void send_chat_history(int client_socket, AESContext *ctx) {
         snprintf(formatted_message, BUFFER_SIZE, "%s\n", (char *)decrypted);
         printf("%s", formatted_message);
         send(client_socket, formatted_message, strlen(formatted_message), 0);
-        usleep(1000);
+        usleep(10000);
         free(encrypted);
         free(decrypted);
     }
@@ -267,6 +331,27 @@ void *handle_client(void *arg) {
             } else {
                 send(client->socket, "NOT_LOGGED_IN", strlen("NOT_LOGGED_IN"), 0);
             }
+        } else if (strcmp(command, "UPLOAD") == 0) {
+            if (!client->is_logged_in) {
+                send(client->socket, "NOT_LOGGED_IN", strlen("NOT_LOGGED_IN"), 0);
+                continue;
+            }
+
+            char filename[100];
+            size_t file_size;
+            sscanf(buffer, "UPLOAD %s %zu", filename, &file_size);
+
+            save_file(client->socket, filename, file_size);
+
+        } else if (strcmp(command, "DOWNLOAD") == 0) {
+            if (!client->is_logged_in) {
+                send(client->socket, "NOT_LOGGED_IN", strlen("NOT_LOGGED_IN"), 0);
+                continue;
+            }
+
+            char filename[100];
+            sscanf(buffer, "DOWNLOAD %s", filename);
+            send_file(client->socket, filename);
         } else {
             if (client->is_logged_in) {
                 broadcast_message(buffer, client->username);
